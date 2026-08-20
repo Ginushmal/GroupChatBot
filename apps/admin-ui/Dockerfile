@@ -1,23 +1,23 @@
-FROM node:22-alpine AS builder
-
+FROM ghcr.io/voidzero-dev/vite-plus:latest AS build
 WORKDIR /app
 
-COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
-COPY apps/admin-ui/package.json ./apps/admin-ui/
-COPY packages ./packages
+# Copy all workspace manifests first for better Docker layer caching
+COPY --chown=vp:vp package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY --chown=vp:vp apps/admin-ui/package.json ./apps/admin-ui/
+COPY --chown=vp:vp apps/bot-service/package.json ./apps/bot-service/
+COPY --chown=vp:vp packages ./packages
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
-RUN pnpm install --filter admin-ui...
+# Install all dependencies (no --filter, matches official Vite+ Docker guide)
+RUN vp install --frozen-lockfile
 
-COPY apps/admin-ui ./apps/admin-ui
-
+# Copy admin-ui source and build
+COPY --chown=vp:vp apps/admin-ui ./apps/admin-ui
 WORKDIR /app/apps/admin-ui
-RUN pnpm run build
+RUN vp run build
 
-FROM nginx:alpine AS runner
-
-COPY --from=builder /app/apps/admin-ui/dist /usr/share/nginx/html
+# Serve static files with nginx
+FROM nginx:alpine AS runtime
+COPY --from=build /app/apps/admin-ui/dist /usr/share/nginx/html
 
 EXPOSE 80
-
 CMD ["nginx", "-g", "daemon off;"]
