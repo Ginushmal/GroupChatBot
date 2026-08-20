@@ -1,0 +1,32 @@
+{
+  "name": "bot-service",
+  "version": "0.0.1",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "tsx watch src/main.ts",
+    "build": "tsc",
+    "start": "node dist/main.js"
+  },
+  "dependencies": {
+    "@nestjs/common": "^11.0.11",
+    "@nestjs/config": "^4.0.1",
+    "@nestjs/core": "^11.0.11",
+    "@nestjs/platform-express": "^11.0.11",
+    "@whiskeysockets/baileys": "catalog:",
+    "dotenv": "^16.4.7",
+    "openai": "^4.86.1",
+    "pino": "^9.6.0",
+    "qrcode-terminal": "^0.12.0",
+    "reflect-metadata": "^0.2.2",
+    "rxjs": "^7.8.2"
+  },
+  "devDependencies": {
+    "@types/express": "^5.0.0",
+    "@types/node": "^22.13.9",
+    "@types/qrcode-terminal": "^0.12.2",
+    "tsdown": "^0.5.9",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}

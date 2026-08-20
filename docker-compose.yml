@@ -1,0 +1,43 @@
+version: "3.8"
+
+services:
+  bot-service:
+    build:
+      context: .
+      dockerfile: apps/bot-service/Dockerfile
+    container_name: groupchatbot-backend
+    restart: unless-stopped
+    ports:
+      - "3000:3000"
+    environment:
+      - PORT=3000
+      - NODE_ENV=production
+      - SQLITE_DB_PATH=/app/data/chatbot.db
+      - BAILEYS_AUTH_DIR=/app/data/baileys_auth
+      - MANIFEST_API_KEY=${MANIFEST_API_KEY}
+      - MANIFEST_BASE_URL=${MANIFEST_BASE_URL:-https://api.manifest.build/v1}
+      - MANIFEST_MODEL=${MANIFEST_MODEL:-gpt-4o-mini}
+      - MEM0_API_KEY=${MEM0_API_KEY}
+      - DEFAULT_TRIGGER_KEY=${DEFAULT_TRIGGER_KEY:-!bot}
+      - DEFAULT_SYSTEM_PROMPT=${DEFAULT_SYSTEM_PROMPT:-You are an intelligent, helpful, and witty group chat participant. Keep your responses concise, conversational, and context-aware.}
+    volumes:
+      - ./data:/app/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/api/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+  admin-ui:
+    build:
+      context: .
+      dockerfile: apps/admin-ui/Dockerfile
+    container_name: groupchatbot-admin-ui
+    restart: unless-stopped
+    ports:
+      - "8080:80"
+    depends_on:
+      - bot-service
+
+volumes:
+  data:

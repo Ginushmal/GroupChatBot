@@ -1,0 +1,30 @@
+packages:
+  - apps/*
+  - packages/*
+  - tools/*
+
+blockExoticSubdeps: false
+catalogMode: prefer
+
+catalog:
+  "@types/node": ^24
+  '@whiskeysockets/baileys': 7.0.0-rc14
+  typescript: ^7.0.2
+  vite: npm:@voidzero-dev/vite-plus-core@0.2.9
+  vite-plus: 0.2.9
+overrides:
+  vite: "catalog:"
+  "@whiskeysockets/eslint-config": "-"
+peerDependencyRules:
+  allowAny:
+    - vite
+  allowedVersions:
+    vite: "*"
+onlyBuiltDependencies:
+  - esbuild
+  - protobufjs
+  - "@whiskeysockets/baileys"
+allowBuilds:
+  '@whiskeysockets/baileys': true
+  esbuild: true
+  protobufjs: true
