@@ -2,15 +2,7 @@ import { Injectable, Logger, Inject, OnModuleInit } from "@nestjs/common";
 import { DatabaseService } from "../database/database.service.js";
 import { MemoryService } from "../memory/memory.service.js";
 import { LlmService } from "../llm/llm.service.js";
-import { WhatsAppService } from "../whatsapp/whatsapp.service.js";
-
-export interface IncomingMessagePayload {
-  groupId: string;
-  senderId: string;
-  senderName: string;
-  text: string;
-  rawMessage?: any;
-}
+import { WhatsAppService, IncomingMessageEvent } from "../whatsapp/whatsapp.service.js";
 
 @Injectable()
 export class OrchestratorService implements OnModuleInit {
@@ -27,88 +19,180 @@ export class OrchestratorService implements OnModuleInit {
     this.whatsAppService.setIncomingMessageHandler(this.handleIncomingMessage.bind(this));
   }
 
-  async handleIncomingMessage(payload: IncomingMessagePayload): Promise<void> {
-    const { groupId, senderId, senderName, text } = payload;
+  private resolveMentions(
+    text: string,
+    mentionedJid: string[],
+    botJids: string[] = [],
+    botName = "You",
+    allowMentions = true,
+  ): string {
+    let resolved = text;
+    for (const jid of mentionedJid) {
+      let replacement = "";
+      const phone = jid.split("@")[0];
 
-    // 1. Record group and user in database
-    this.dbService.upsertGroup(groupId);
+      if (botJids.includes(jid)) {
+        replacement = allowMentions ? "@AI Assistant" : `@${botName}`;
+      } else {
+        const name = this.dbService.getUserName(jid);
+        replacement = name ? `@${name}` : `@${phone}`;
+      }
+
+      const before = resolved;
+      resolved = resolved.replace(new RegExp(`@${phone}\\b`, "g"), replacement);
+      resolved = resolved.replace(new RegExp(`@${jid}\\b`, "g"), replacement);
+
+      if (before === resolved) {
+        this.logger.debug(`Could not find mention string for JID ${jid} in text: "${text}"`);
+      } else {
+        this.logger.debug(`Resolved mention for ${jid} to ${replacement}`);
+      }
+    }
+    return resolved;
+  }
+
+  async handleIncomingMessage(payload: IncomingMessageEvent): Promise<void> {
+    const {
+      chatId,
+      chatName,
+      senderId,
+      senderName,
+      text,
+      isBotReply,
+      mentionedJid,
+      isBotMentioned,
+      botJids,
+      botName,
+    } = payload;
+
+    // Ignore messages sent by our own bot process (already logged)
+    if (isBotReply) return;
+
+    // 1. Record chat and user in database
+    this.dbService.upsertChat(chatId, chatName);
     this.dbService.upsertUser(senderId, senderName);
 
-    // 2. Fetch global and group configuration
-    const config = this.dbService.getConfig();
-    const group = this.dbService.getGroup(groupId);
+    // 2. Fetch global and chat configurations
+    const settings = this.dbService.getSettings();
+    const chat = this.dbService.getChat(chatId);
+    const allowsMentions = chat?.allow_mentions !== 0;
 
-    if (!config || config.is_active_globally === 0) {
+    // 3. Resolve mentions in text
+    const cleanedText =
+      mentionedJid && mentionedJid.length > 0
+        ? this.resolveMentions(text, mentionedJid, botJids, botName || "You", allowsMentions)
+        : text;
+
+    if (!settings || settings.is_active_globally === 0) {
       this.logger.debug("Bot is globally disabled. Skipping message.");
       return;
     }
 
-    if (group && group.is_active === 0) {
-      this.logger.debug(`Bot is disabled in group ${groupId}. Skipping message.`);
+    if (chat && chat.is_active === 0) {
+      this.logger.debug(`Bot is disabled in chat ${chatId}. Skipping message.`);
       return;
     }
 
-    const triggerKey = config.trigger_key || "!bot";
-    const trimmedText = text.trim();
-    const isTriggered =
-      trimmedText.toLowerCase().startsWith(triggerKey.toLowerCase()) ||
-      trimmedText.toLowerCase().startsWith("@bot");
+    const effectiveTrigger = chat?.custom_trigger || settings.trigger_key || "!bot";
+    const trimmedText = cleanedText.trim();
+
+    const isWordTriggered = trimmedText.toLowerCase().startsWith(effectiveTrigger.toLowerCase());
+    const isMentionTriggered = allowsMentions && isBotMentioned;
+
+    const isTriggered = isWordTriggered || isMentionTriggered;
 
     if (!isTriggered) {
       // Short-term memory: Log regular conversation
-      this.memoryService.saveMessage(groupId, senderId, senderName, text, false);
-
-      // Long-term memory: Asynchronously update facts in Mem0 for meaningful context
-      if (text.length > 20 && !text.startsWith("!")) {
-        this.memoryService.addFact(groupId, senderId, `${senderName}: ${text}`).catch(() => {});
-      }
+      this.memoryService.saveMessage(chatId, senderId, senderName, cleanedText, "human");
       return;
     }
 
-    // Extract the actual user query by stripping trigger
+    // Extract user prompt
     let userPrompt = trimmedText;
-    if (userPrompt.toLowerCase().startsWith(triggerKey.toLowerCase())) {
-      userPrompt = userPrompt.slice(triggerKey.length).trim();
-    } else if (userPrompt.toLowerCase().startsWith("@bot")) {
-      userPrompt = userPrompt.slice(4).trim();
+    if (isWordTriggered) {
+      userPrompt = userPrompt.slice(effectiveTrigger.length).trim();
+    } else if (isMentionTriggered) {
+      // Strip @mention prefix
+      userPrompt = userPrompt.replace(/^@\S+\s*/, "").trim();
     }
 
     if (!userPrompt) {
       userPrompt = "Hello!";
     }
 
-    this.logger.log(`🎯 Trigger matched in group ${groupId} from ${senderName}: "${userPrompt}"`);
+    this.logger.log(`🎯 Trigger matched in chat ${chatId} (${chatName || chatId}) from ${senderName}: "${userPrompt}"`);
+    const startTime = Date.now();
 
     // Save user's trigger message to SQLite (Short-term)
-    this.memoryService.saveMessage(groupId, senderId, senderName, text, false);
+    this.memoryService.saveMessage(chatId, senderId, senderName, cleanedText, "human");
 
-    // Save to Mem0 (Long-term) so the bot learns from direct interactions too
-    if (userPrompt.length > 5) {
-      this.memoryService.addFact(groupId, senderId, `${senderName} asked the bot: ${userPrompt}`).catch(() => {});
+    // 4. Batch upload unsynced messages to Mem0 before retrieval
+    try {
+      await this.memoryService.syncUnsyncedMessages(chatId, settings.mem0_api_key);
+    } catch (err: any) {
+      this.logger.warn(`Error during bulk sync: ${err.message}`);
     }
 
-    // Fetch short-term context (last 50 messages)
-    const recentMessages = this.memoryService.getRecentContext(groupId, 50);
+    // 5. Evaluate smart cache invalidation and fetch long-term facts
+    const forceRefresh = this.memoryService.shouldInvalidateCache(
+      chatId,
+      userPrompt,
+      mentionedJid,
+      settings,
+    );
+    const facts = await this.memoryService.getFacts(
+      chatId,
+      senderName,
+      userPrompt,
+      forceRefresh,
+      settings,
+    );
 
-    // Fetch long-term facts from Mem0
-    const facts = await this.memoryService.getFacts(groupId, senderId);
+    // 6. Fetch short-term context (last X messages from SQLite)
+    const recentMessages = this.memoryService.getRecentContext(chatId, settings.short_term_msg_limit ?? 50);
 
-    // Generate LLM reply via Manifest Router
-    const reply = await this.llmService.generateReply({
-      systemPrompt: config.system_prompt,
-      customGroupPrompt: group?.custom_prompt,
+    // 7. Generate LLM reply
+    const result = await this.llmService.generateReply({
+      systemPrompt: settings.system_prompt,
+      customChatPrompt: chat?.custom_prompt,
       facts,
       recentMessages,
       senderName,
       userPrompt,
+      apiKey: settings.llm_api_key,
     });
 
-    if (reply) {
-      // Send message to WhatsApp group
-      await this.whatsAppService.sendMessage(groupId, reply);
+    const latencyMs = Date.now() - startTime;
+
+    if (result.reply) {
+      // Send reply to WhatsApp
+      await this.whatsAppService.sendMessage(chatId, result.reply);
 
       // Save bot's reply to SQLite
-      this.memoryService.saveMessage(groupId, "bot", "AI Assistant", reply, true);
+      this.memoryService.saveMessage(chatId, "bot", "AI Assistant", result.reply, "bot");
+
+      // Save complete invocation to BotInvocations for God-mode Observability
+      try {
+        this.dbService.saveInvocation({
+          chat_id: chatId,
+          sender_id: senderId,
+          trigger_text: cleanedText,
+          system_prompt: settings.system_prompt,
+          context_messages: JSON.stringify(
+            recentMessages.map((m) => ({
+              role: m.source === "bot" ? "assistant" : "user",
+              name: m.sender_name,
+              content: m.content,
+            }))
+          ),
+          mem0_facts: JSON.stringify(facts),
+          model_used: result.modelUsed,
+          response_text: result.reply,
+          latency_ms: latencyMs,
+        });
+      } catch (logErr: any) {
+        this.logger.warn(`Failed to save bot invocation record: ${logErr.message}`);
+      }
     }
   }
 }
